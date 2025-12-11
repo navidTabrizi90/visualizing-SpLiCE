@@ -1,65 +1,56 @@
-import numpy as np
+import torch
+import torch.nn.functional as F
+from typing import Optional
 
 class ModalityAligner:
     """
-    Handles Step 3 of SpLiCE:
-    - Loading or computing μ_img (image mean)
-    - Computing μ_con (concept mean)
-    - Centering & normalizing the concept dictionary
-    - Providing functions to center image embeddings
+    Handles geometric alignment to fix the 'Modality Gap'.
+    
+    Paper Reference:
+    - [cite_start]CLIP image and text embeddings exist on two different cones[cite: 321].
+    - [cite_start]Solution: Center both using their respective means (mu_img, mu_con)[cite: 322].
+    - [cite_start]Critical: Vectors must be re-normalized after centering[cite: 322].
     """
+    
+    def __init__(self, device: str = None):
+        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
+        self.mu_img: Optional[torch.Tensor] = None
+        self.mu_con: Optional[torch.Tensor] = None
+        
+    def set_image_mean(self, mean_tensor: torch.Tensor):
+        self.mu_img = mean_tensor.to(self.device)
 
-    def __init__(self, C_txt, mu_img_path=None):
+    def align_dictionary(self, concept_matrix: torch.Tensor) -> torch.Tensor:
         """
-        C_txt : numpy array of shape [num_concepts, d]
-        mu_img_path : path to precomputed μ_img (recommended)
+        Centers the dictionary C using the Concept Mean (mu_con).
+        [cite_start]Ref: C_centered = sigma(g(x) - mu_con)[cite: 325].
         """
+        self.mu_con = torch.mean(concept_matrix, dim=0, keepdim=True).to(self.device)
+        C_centered = concept_matrix.to(self.device) - self.mu_con
+        # Re-normalize to unit sphere
+        C_centered = F.normalize(C_centered, p=2, dim=-1)
+        return C_centered
 
-        self.C_txt = C_txt  # raw text embeddings, shape [num_concepts, d]
-        self.d = C_txt.shape[1]
-
-        # -----------------------------
-        # STEP 3.1 — LOAD OR CREATE μ_img
-        # -----------------------------
-        if mu_img_path is not None:
-            self.mu_img = np.load(mu_img_path)                  # [d]
-        else:
-            print("[WARNING] No μ_img file provided — using zeros. "
-                  "You MUST replace this with the real COCO image mean.")
-            self.mu_img = np.zeros(self.d, dtype=np.float32)
-
-        # -----------------------------
-        # STEP 3.2 — COMPUTE μ_con
-        # -----------------------------
-        self.mu_con = C_txt.mean(axis=0)                         # [d]
-
-        # -----------------------------
-        # STEP 3.3 — CENTER & NORMALIZE CONCEPT DICTIONARY
-        # -----------------------------
-        C_centered = C_txt - self.mu_con  # subtract concept mean
-
-        # normalize each concept vector
-        C_centered = C_centered / np.clip(
-            np.linalg.norm(C_centered, axis=1, keepdims=True), 1e-8, np.inf
-        )
-
-        # final dictionary shape: [d, num_concepts]
-        self.C_centered = C_centered.T
-
-        print("[ModalityAligner] Step 3 complete.")
-        print(" - μ_img.shape =", self.mu_img.shape)
-        print(" - μ_con.shape =", self.mu_con.shape)
-        print(" - C_centered.shape =", self.C_centered.shape)
-
-
-    # -----------------------------
-    # STEP 3.4 — CENTER IMAGE EMBEDDING
-    # -----------------------------
-    def center_image_embedding(self, z_img):
+    def align_image(self, z_img: torch.Tensor) -> torch.Tensor:
         """
-        z_img: numpy vector shape [d]
-        Returns: centered & normalized image embedding
+        Centers the image using the Image Mean (mu_img).
+        [cite_start]Ref: z_centered = sigma(z^img - mu_img)[cite: 326].
         """
-        z_centered = z_img - self.mu_img
-        z_centered = z_centered / np.linalg.norm(z_centered)
+        if self.mu_img is None:
+            raise ValueError("Image mean (mu_img) must be set before aligning images.")
+        
+        z_centered = z_img.to(self.device) - self.mu_img
+        # Re-normalize to unit sphere
+        z_centered = F.normalize(z_centered, p=2, dim=-1)
         return z_centered
+
+    def unalign_reconstruction(self, z_rec_centered: torch.Tensor) -> torch.Tensor:
+        """
+        Reverses alignment for reconstruction.
+        [cite_start]Ref: z_hat = sigma(C w + mu_img)[cite: 334].
+        """
+        if self.mu_img is None:
+            raise ValueError("Image mean is missing.")
+            
+        z_original_space = z_rec_centered + self.mu_img
+        return F.normalize(z_original_space, p=2, dim=-1)

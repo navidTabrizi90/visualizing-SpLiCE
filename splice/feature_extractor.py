@@ -1,41 +1,75 @@
-# step1_load_clip.py
-
 import torch
 import open_clip
 from PIL import Image
+from typing import List, Union
+from tqdm import tqdm
 
-class CLIPWrapper:
-    def __init__(self, model_name="ViT-B-32", pretrained="openai", device=None):
-        # Device setup
+class CLIPFeatureExtractor:
+    """
+    Wrapper for OpenCLIP to extract dense image and text embeddings.
+    
+    Paper Reference:
+    - [cite_start]Uses OpenCLIP ViT-B/32 model[cite: 338].
+    - [cite_start]Normalizes embeddings to the unit sphere (sigma operation)[cite: 324].
+    """
+    
+    def __init__(self, 
+                 model_name: str = 'ViT-B-32', 
+                 pretrained: str = 'laion2b_s34b_b79k', 
+                 device: str = None):
+        """
+        Initializes the CLIP model.
+        Args:
+            device: 'cuda' or 'cpu'. If None, auto-detects.
+        """
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
-
-        # Load model + preprocess + tokenizer
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+            
+        print(f"Loading {model_name} ({pretrained}) on {self.device}...")
+        
+        # Load model and preprocessing transform
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
+            model_name, 
+            pretrained=pretrained, 
+            device=self.device
         )
-        self.tokenizer = open_clip.get_tokenizer(model_name)
-
-        self.model = self.model.to(self.device)
         self.model.eval()
 
-    # --------------------------------------------------------
-    # Encode image -> returns normalized embedding (1D vector)
-    # --------------------------------------------------------
-    def encode_image(self, image: Image.Image):
+    def get_image_embedding(self, image_input: Union[str, Image.Image]) -> torch.Tensor:
+        """
+        Extracts and normalizes dense image embedding (z^img).
+        [cite_start]Ref: "z^img = f(x^img)"[cite: 180].
+        """
+        if isinstance(image_input, str):
+            image = Image.open(image_input).convert("RGB")
+        else:
+            image = image_input
+            
+        image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
+        
         with torch.no_grad():
-            img_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
-            emb = self.model.encode_image(img_tensor)  # shape [1, d]
-            emb = emb / emb.norm(dim=-1, keepdim=True)  # normalize
-        return emb.squeeze(0).cpu().numpy()  # shape [d]
+            features = self.model.encode_image(image_tensor)
+            # [cite_start]CRITICAL: SpLiCE requires unit-norm embeddings [cite: 324]
+            features = features / features.norm(dim=-1, keepdim=True)
+            
+        return features
 
-    # --------------------------------------------------------
-    # Encode list of text strings -> normalized embeddings
-    # --------------------------------------------------------
-    def encode_text(self, texts):
-        with torch.no_grad():
-            tokens = self.tokenizer(texts).to(self.device)
-            emb = self.model.encode_text(tokens)  # shape [B, d]
-            emb = emb / emb.norm(dim=-1, keepdim=True)
-        return emb.cpu().numpy()  # shape [B, d]
+    def get_text_embedding(self, text_list: List[str], batch_size: int = 256) -> torch.Tensor:
+        """
+        Extracts and normalizes dense text embeddings (z^txt) for dictionary C.
+        """
+        all_features = []
+        
+        # Batch processing to handle large vocabularies (10k+ words)
+        for i in tqdm(range(0, len(text_list), batch_size), desc="Embedding Concepts"):
+            batch = text_list[i : i + batch_size]
+            tokens = open_clip.tokenize(batch).to(self.device)
+            
+            with torch.no_grad():
+                features = self.model.encode_text(tokens)
+                features = features / features.norm(dim=-1, keepdim=True)
+                all_features.append(features)
+                
+        return torch.cat(all_features, dim=0)

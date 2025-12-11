@@ -1,67 +1,156 @@
-from sklearn.linear_model import Lasso
+import torch
+import torch.nn.functional as F
 import numpy as np
+from sklearn.linear_model import Lasso
 
-class SpLiCESolver:
-    def __init__(self, C_centered, concept_texts, lambda_l1=0.1):
-        self.C_centered = C_centered  # (d, c) from Step 3
-        self.concept_texts = concept_texts
-        self.lambda_l1 = lambda_l1  # Controls sparsity (0.1-0.3 recommended)
-        self.d, self.c = C_centered.shape
+class CpuSpliceSolver:
+    """
+    Standard Lasso solver using Scikit-Learn.
+    Recommended for single-image inference or small batches on CPU.
+    
+    Mathematical Formulation:
+    min_w ||Cw - z||^2 + 2*alpha*||w||_1  s.t. w >= 0
+    """
+    
+    def __init__(self, alpha: float = 0.03):
+        """
+        Args:
+            alpha: Sparsity regularization strength (lambda). 
+                   Paper suggests aiming for l0 norm of 5-20.
+                   Typical range: 0.01 - 0.05.
+        """
+        self.alpha = alpha
+
+    def solve(self, dictionary_matrix: torch.Tensor, target_image_vector: torch.Tensor) -> torch.Tensor:
+        """
+        Solves for w using coordinate descent (sklearn).
         
-    def solve_sparse_decomposition(self, z_centered):
-        """Solve min_w ||C_centered w - z_centered||_2^2 + 2λ||w||_1, w ≥ 0."""
-        # Lasso expects features x samples, so transpose: C_centered.T (c x d), z_centered.T (d,)
-        lasso = Lasso(
-            alpha=self.lambda_l1,  # L1 penalty strength
-            positive=True,         # Non-negative constraint
-            max_iter=10000,        # Ensure convergence
-            selection='random'     # Better for high-dimensional
+        Args:
+            dictionary_matrix: (V, 512) tensor (C_centered).
+            target_image_vector: (1, 512) tensor (z_centered).
+            
+        Returns:
+            weights: (V,) tensor of sparse coefficients.
+        """
+        # Move to CPU / Numpy
+        X = dictionary_matrix.detach().cpu().numpy().T  # Shape (512, V)
+        y = target_image_vector.detach().cpu().numpy().flatten() # Shape (512,)
+        
+        # Configure Lasso
+        # positive=True enforces w >= 0 (Non-negativity constraint)
+        # fit_intercept=False because data is already centered
+        model = Lasso(
+            alpha=self.alpha, 
+            positive=True, 
+            fit_intercept=False, 
+            max_iter=5000,
+            tol=1e-4
         )
         
-        # Fit: w = argmin ||C w - z||^2 + λ||w||_1
-        w_sparse = lasso.fit(self.C_centered.T, z_centered).coef_
+        model.fit(X, y)
         
-        # Sparsity metrics
-        sparsity_l0 = np.sum(w_sparse > 1e-6)  # Non-zero count
-        sparsity_l1 = np.sum(w_sparse)
-        
-        print(f"Sparsity: l0={sparsity_l0}, l1={sparsity_l1:.3f}")
-        print(f"Top active concepts: {sparsity_l0}")
-        
-        return w_sparse
+        return torch.from_numpy(model.coef_).float()
+
+
+class ADMMSpLICESolver:
+    """
+    GPU-accelerated solver using ADMM (Alternating Direction Method of Multipliers).
+    Recommended for batched processing (e.g., decomposing entire datasets).
     
-    def get_top_k_concepts(self, w_sparse, k=10):
-        """Extract top-k active concepts with weights."""
-        # Get indices of non-zero weights, sorted by magnitude
-        active_indices = np.where(w_sparse > 1e-6)[0]
-        top_indices = active_indices[np.argsort(w_sparse[active_indices])[-k:][::-1]]
+    Paper Reference: Appendix A.3
+    - Optimizes: min ||Cw - z||^2 + 2*lambda*||w||_1
+    - Uses Woodbury Matrix Identity for fast inversion of (V,V) matrix.
+    """
+    
+    def __init__(self, dictionary_matrix: torch.Tensor, alpha: float = 0.03, rho: float = 5.0, device: str = 'cuda'):
+        """
+        Initializes solver and pre-computes the large matrix inversion.
         
-        results = {
-            self.concept_texts[i]: float(w_sparse[i]) 
-            for i in top_indices 
-            if w_sparse[i] > 1e-6
-        }
-        return results
+        Args:
+            dictionary_matrix: (V, 512) tensor (C).
+            alpha: L1 regularization strength.
+            rho: ADMM penalty parameter (Paper sets rho=5.0).
+            device: 'cuda' or 'cpu'.
+        """
+        self.device = device
+        self.alpha = alpha
+        self.rho = rho
+        
+        # Paper notation: C is (512, V). Input is (V, 512), so we transpose.
+        # self.C shape: (512, 15000)
+        self.C = dictionary_matrix.T.to(device)
+        self.D, self.V = self.C.shape
+        
+        # --- Pre-computation (Woodbury Identity) ---
+        # We need (2*C^T*C + rho*I)^(-1).
+        # Inverting (V, V) is slow. We invert (D, D) instead.
+        # Identity: (A + UBV)^-1 = A^-1 - A^-1 U (B^-1 + V A^-1 U)^-1 V A^-1
+        
+        print("Pre-computing ADMM matrices (Woodbury)...")
+        with torch.no_grad():
+            C_CT = torch.mm(self.C, self.C.T) # (512, 512)
+            
+            # Core term to invert: (I + (2/rho) * C * C^T)
+            core_matrix = torch.eye(self.D, device=device) + (2.0 / rho) * C_CT
+            
+            self.core_inv = torch.linalg.inv(core_matrix)
+            self.C_T = self.C.T # (15000, 512)
 
-# Integrate all previous steps
-model = SpLiCEModel()
-concepts = SpLiCEConceptDictionary(model.model, model.tokenizer)
-C_raw, concept_names = concepts.build_dictionary()
+    def soft_threshold(self, x: torch.Tensor, kappa: float) -> torch.Tensor:
+        """
+        Proximal operator for L1 norm: S_k(a) = sign(a) * max(|a| - k, 0)
+        """
+        return torch.sign(x) * torch.maximum(torch.abs(x) - kappa, torch.tensor(0.0, device=self.device))
 
-alignment = SpLiCEModalityAlignment(model.model, C_raw, concept_names)
-C_centered = alignment.align_concept_dictionary()
-
-# Test full pipeline
-image = Image.open("your_image.jpg")
-z_img = model.extract_image_embedding(image)
-z_centered = alignment.center_and_normalize(z_img)
-
-# Solve sparse decomposition
-solver = SpLiCESolver(C_centered, concept_names, lambda_l1=0.2)
-w_sparse = solver.solve_sparse_decomposition(z_centered)
-
-# Get interpretable results
-top_concepts = solver.get_top_k_concepts(w_sparse, k=10)
-print("Top 10 SpLiCE concepts:")
-for concept, weight in top_concepts.items():
-    print(f"  {concept}: {weight:.3f}")
+    def solve(self, target_images: torch.Tensor, max_iter: int = 1000, tol: int = 1e-4) -> torch.Tensor:
+        """
+        Batched solve.
+        
+        Args:
+            target_images: (B, 512) tensor of centered images.
+            
+        Returns:
+            weights: (B, V) tensor of sparse coefficients.
+        """
+        B = target_images.shape[0]
+        targets = target_images.T.to(self.device) # (512, B)
+        
+        # Initialize variables
+        w_k = torch.zeros(self.V, B, device=self.device)
+        z_k = torch.zeros(self.V, B, device=self.device)
+        u_k = torch.zeros(self.V, B, device=self.device)
+        
+        for k in range(max_iter):
+            prev_z = z_k.clone()
+            
+            # --- 1. w-update (Quadratic Min via Woodbury) ---
+            # RHS = rho(z - u) + 2*C^T*y
+            rhs = self.rho * (z_k - u_k) + 2.0 * torch.mm(self.C_T, targets)
+            
+            # Apply inverse: w = (1/rho) * (rhs - 2/rho * C^T * core_inv * C * rhs)
+            c_rhs = torch.mm(self.C, rhs)
+            inv_c_rhs = torch.mm(self.core_inv, c_rhs)
+            term_2 = torch.mm(self.C_T, inv_c_rhs)
+            
+            w_next = (rhs - (2.0 / self.rho) * term_2) / self.rho
+            
+            # --- 2. z-update (Proximal + Constraints) ---
+            # Soft thresholding for Sparsity (L1)
+            # ReLU for Non-negativity
+            threshold = self.alpha / self.rho
+            z_next = self.soft_threshold(w_next + u_k, threshold)
+            z_next = F.relu(z_next)
+            
+            # --- 3. u-update (Dual) ---
+            u_next = u_k + w_next - z_next
+            
+            # --- Convergence Check ---
+            primal_res = torch.norm(w_next - z_next)
+            dual_res = torch.norm(self.rho * (z_next - prev_z))
+            
+            w_k, z_k, u_k = w_next, z_next, u_next
+            
+            if primal_res < tol and dual_res < tol:
+                break
+                
+        return z_k.T # Return (B, V)
