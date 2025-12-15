@@ -57,7 +57,6 @@ class ADMMSpLICESolver:
     GPU-accelerated solver using ADMM (Alternating Direction Method of Multipliers).
     Recommended for batched processing (e.g., decomposing entire datasets).
     
-    Paper Reference: Appendix A.3
     - Optimizes: min ||Cw - z||^2 + 2*lambda*||w||_1
     - Uses Woodbury Matrix Identity for fast inversion of (V,V) matrix.
     """
@@ -69,22 +68,18 @@ class ADMMSpLICESolver:
         Args:
             dictionary_matrix: (V, 512) tensor (C).
             alpha: L1 regularization strength.
-            rho: ADMM penalty parameter (Paper sets rho=5.0).
+            rho: ADMM penalty parameter (rho=5.0).
             device: 'cuda' or 'cpu'.
         """
         self.device = device
         self.alpha = alpha
         self.rho = rho
         
-        # Paper notation: C is (512, V). Input is (V, 512), so we transpose.
+        # notation: C is (512, V). Input is (V, 512), so we transpose.
         # self.C shape: (512, 15000)
         self.C = dictionary_matrix.T.to(device)
         self.D, self.V = self.C.shape
         
-        # --- Pre-computation (Woodbury Identity) ---
-        # We need (2*C^T*C + rho*I)^(-1).
-        # Inverting (V, V) is slow. We invert (D, D) instead.
-        # Identity: (A + UBV)^-1 = A^-1 - A^-1 U (B^-1 + V A^-1 U)^-1 V A^-1
         
         print("Pre-computing ADMM matrices (Woodbury)...")
         with torch.no_grad():

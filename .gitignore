@@ -1,0 +1,5 @@
+# Datasets
+Sketchy/
+*.npz
+# Large dataset metadata
+SKETCHY_train_nested_with_sketches_withHED.json

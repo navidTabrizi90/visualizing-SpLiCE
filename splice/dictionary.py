@@ -6,10 +6,8 @@ from tqdm import tqdm
 class ConceptDictionary:
     """
     Manages the concept vocabulary (C).
-    
-    Paper Reference:
-    - [cite_start]Constructs an overcomplete dictionary[cite: 223].
-    - [cite_start]Pruning logic removes redundant concepts (cosine sim > 0.9)[cite: 229, 230].
+    Constructs an overcomplete dictionary
+    Pruning logic removes redundant concepts (cosine sim > 0.9)
     """
     
     def __init__(self, feature_extractor):
@@ -19,8 +17,7 @@ class ConceptDictionary:
 
     def prune_compositionality(self, texts: List[str], embeddings: torch.Tensor, threshold: float = 0.9) -> Tuple[List[str], torch.Tensor]:
         """
-        Pruning Rule 2: Remove bigrams highly similar to the average of their words.
-        [cite_start]e.g., if 'red car' ~ mean('red', 'car'), drop 'red car'[cite: 230].
+        Pruning Rule 2: Remove bigrams highly similar to the average of their words.e.g., if 'red car' ~ mean('red', 'car'), drop 'red car'
         """
         keep_indices = []
         print("Pruning bigrams based on compositionality...")
@@ -34,8 +31,6 @@ class ConceptDictionary:
                 
             if len(words) >= 2:
                 z_phrase = embeddings[i]
-                # Note: This inner loop call is slow; strictly for correctness demonstration.
-                # In production, cache word embeddings first.
                 z_parts = self.extractor.get_text_embedding(words, batch_size=len(words))
                 z_avg = torch.mean(z_parts, dim=0)
                 z_avg = z_avg / z_avg.norm(dim=-1, keepdim=True)
@@ -49,7 +44,7 @@ class ConceptDictionary:
 
     def prune_pairwise_similarity(self, texts: List[str], embeddings: torch.Tensor, threshold: float = 0.9) -> Tuple[List[str], torch.Tensor]:
         """
-        [cite_start]Pruning Rule 1: Ensure no two concepts have cosine sim > 0.9[cite: 229].
+        Pruning Rule 1: Ensure no two concepts have cosine sim > 0.9
         """
         print(f"Pruning pairwise redundancy (Input: {len(texts)})...")
         

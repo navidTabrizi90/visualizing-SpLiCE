@@ -1,88 +1,68 @@
 import torch
 import os
-import glob
-from PIL import Image
 from tqdm import tqdm
-from splice.feature_extractor import CLIPFeatureExtractor
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+import open_clip
 
-def compute_image_mean(image_folder, save_path="data/mscoco_mean.pt", batch_size=64):
-    """
-    Computes the average CLIP embedding for a large set of images.
-    Paper Source: "estimated over MSCOCO train set"
-    """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"--- Computing Image Cone Mean ---")
-    print(f"Source: {image_folder}")
-    print(f"Device: {device}")
+# --- CONFIGURATION ---
+# limit the calculation to 20,000 images. This is statistically enough to find the "center" of the dataset 
+
+LIMIT = 20000 
+BATCH_SIZE = 64
+TARGET_FOLDER = "Sketchy/images" 
+OUTPUT_PATH = "data/mscoco_mean.pt" # Keep name consistent for other scripts
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def compute_image_mean():
+    print(f"--- Computing Image Mean (Fast Mode: Limit {LIMIT}) ---")
+    print(f"Source: {TARGET_FOLDER}")
     
-    # 1. Load Model
-    extractor = CLIPFeatureExtractor(device=device)
-    
-    # 2. Find Images (JPEGs, PNGs)
-    # Adjust extensions if needed
-    extensions = ['*.jpg', '*.jpeg', '*.png']
-    image_paths = []
-    for ext in extensions:
-        image_paths.extend(glob.glob(os.path.join(image_folder, "**", ext), recursive=True))
-    
-    if len(image_paths) == 0:
-        print(f"Error: No images found in {image_folder}")
+    # 1. Load CLIP Model (for preprocessing only)
+    model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+    model.to(DEVICE)
+    model.eval()
+
+    # 2. Setup Dataset
+    try:
+        dataset = datasets.ImageFolder(root=TARGET_FOLDER, transform=preprocess)
+    except Exception as e:
+        print(f"Error loading images: {e}")
         return
 
-    print(f"Found {len(image_paths)} images. Processing...")
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     
     # 3. Compute Mean
-    embedding_sum = torch.zeros(1, 512).to(device)
+    total_embedding = torch.zeros(512).to(DEVICE)
     count = 0
     
-    # Process in batches
-    for i in tqdm(range(0, len(image_paths), batch_size)):
-        batch_paths = image_paths[i : i + batch_size]
-        batch_tensors = []
-        
-        # Load and Preprocess
-        valid_batch = False
-        for p in batch_paths:
-            try:
-                img = Image.open(p).convert("RGB")
-                # Preprocess returns (3, 224, 224)
-                tensor = extractor.preprocess(img)
-                batch_tensors.append(tensor)
-                valid_batch = True
-            except Exception as e:
-                print(f"Skipping bad image: {p}")
-        
-        if not valid_batch:
-            continue
+    print("Processing...")
+    with torch.no_grad():
+        for images, _ in tqdm(dataloader):
+            images = images.to(DEVICE)
             
-        # Stack into (B, 3, 224, 224)
-        input_batch = torch.stack(batch_tensors).to(device)
-        
-        with torch.no_grad():
-            # Get features
-            features = extractor.model.encode_image(input_batch)
-            # Normalize per image FIRST (Critical per paper)
-            features = features / features.norm(dim=-1, keepdim=True)
+            # Get Embeddings
+            batch_embeddings = model.encode_image(images)
+            # Normalize to unit sphere 
+            batch_embeddings = batch_embeddings / batch_embeddings.norm(dim=-1, keepdim=True)
             
-            # Add to sum
-            embedding_sum += torch.sum(features, dim=0, keepdim=True)
-            count += len(batch_tensors)
+            # Sum up
+            total_embedding += batch_embeddings.sum(dim=0)
+            count += len(images)
             
-    # 4. Final Average
-    if count > 0:
-        mu_img = embedding_sum / count
-        # Save
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        torch.save(mu_img, save_path)
-        print(f"✅ Success! Mean vector computed from {count} images.")
-        print(f"Saved to {save_path}")
-    else:
-        print("Failed to process any images.")
+            # Stop if we hit the limit
+            if count >= LIMIT:
+                break
+    
+    # 4. Average and Save
+    final_mean = total_embedding / count
+    final_mean = final_mean / final_mean.norm() # Re-normalize the mean vector itself
+
+    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    torch.save(final_mean.cpu(), OUTPUT_PATH)
+    
+    print(f"✅ Success! Computed mean from {count} images.")    
+    print(f"Saved to {OUTPUT_PATH}")
 
 if __name__ == "__main__":
-    # USER SETTING: Change this path to your folder of images!
-    # If you don't have MSCOCO, use any folder with 1000+ diverse images.
-    # Example: "C:/Datasets/coco/train2017"
-    TARGET_FOLDER = "data/calibration"
-    
-    compute_image_mean(TARGET_FOLDER)   
+    compute_image_mean()

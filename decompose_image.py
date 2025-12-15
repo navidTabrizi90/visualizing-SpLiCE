@@ -1,91 +1,94 @@
 import torch
+import argparse
 import os
-import sys
 import numpy as np
 from PIL import Image
 
+# Import your SpLiCE package
 from splice.feature_extractor import CLIPFeatureExtractor
 from splice.dictionary import ConceptDictionary
 from splice.aligner import ModalityAligner
-from splice.solver import ADMMSpLICESolver, CpuSpliceSolver
-from splice.interpreter import SpLiCEInterpreter
+from splice.solver import ADMMSpLICESolver
 
-def main():
-    # --- CONFIG ---
-    # Paper uses l0 norms of 5-20. Increase Alpha to increase sparsity.
-    ALPHA = 0.1 
-    VOCAB_PATH = "data/vocab.txt"
-    MEAN_PATH = "data/mscoco_mean.pt"
-    
-    # Get image from args or default
-    IMAGE_PATH = sys.argv[1] if len(sys.argv) > 1 else "example.jpg"
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# --- CONFIGURATION ---
+VOCAB_PATH = 'data/vocab.txt'
+MEAN_PATH = 'data/mscoco_mean.pt' # This now contains your Sketchy mean
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+def decompose_single_image(image_path):
     print(f"--- SpLiCE Decomposition ---")
-    print(f"Target: {IMAGE_PATH} | Device: {DEVICE}")
+    print(f"Target: {image_path}")
+    print(f"Device: {DEVICE}")
 
-    # 1. Load Model
+    # 1. Initialize Components
+    print("Loading CLIP and SpLiCE modules...")
     extractor = CLIPFeatureExtractor(device=DEVICE)
-
+    aligner = ModalityAligner(device=DEVICE)
+    
     # 2. Load Vocabulary
     if not os.path.exists(VOCAB_PATH):
-        print("Error: Run 'fetch_real_vocab.py' first.")
+        print(f"Error: {VOCAB_PATH} not found. Run fetch_real_vocab_cc3m.py first.")
         return
+    
     with open(VOCAB_PATH, "r", encoding="utf-8") as f:
         vocab = [line.strip() for line in f if line.strip()]
     
-    # Use only first 10k to match paper scale & save memory
-    vocab = vocab[:10000]
-    
+    # Build Dictionary Matrix
     dict_builder = ConceptDictionary(extractor)
-    # do_pruning=False because our fetched vocab is already clean
+    # Note: For single image inference, we can skip complex pruning for speed
     C_matrix = dict_builder.build_vocabulary(vocab, do_pruning=False)
 
-    # 3. Align Modalities
-    aligner = ModalityAligner(device=DEVICE)
+    # 3. Load & Set Image Mean (Calibration)
     if os.path.exists(MEAN_PATH):
-        print(f"Loading Image Mean from {MEAN_PATH}...")
         aligner.set_image_mean(torch.load(MEAN_PATH, map_location=DEVICE))
     else:
-        print("Warning: Using Zero-Mean (Approximate). Run 'fetch_calibration.py' + 'compute_mean.py' for better fidelity.")
+        print("Warning: Mean file not found. Results might be inaccurate.")
         aligner.mu_img = torch.zeros(1, 512).to(DEVICE)
-    
+
+    # 4. Align Dictionary
+    # (Center the vocabulary concepts relative to the image mean)
     C_centered = aligner.align_dictionary(C_matrix)
+    
+    # 5. Initialize Solver
+    solver = ADMMSpLICESolver(C_centered, alpha=0.1, device=DEVICE)
 
-    # 4. Solve
-    if not os.path.exists(IMAGE_PATH):
-        print(f"Image {IMAGE_PATH} not found.")
-        return
-
-    z_img = extractor.get_image_embedding(IMAGE_PATH)
-    z_centered = aligner.align_image(z_img)
-
-    print("Solving sparse decomposition...")
-    if DEVICE == "cuda":
-        solver = ADMMSpLICESolver(C_centered, alpha=ALPHA, device=DEVICE)
-    else:
-        solver = CpuSpliceSolver(alpha=ALPHA)
+    # --- INFERENCE ---
+    try:
+        # A. Embed Image
+        z_img = extractor.get_image_embedding(image_path)
         
-    weights = solver.solve(z_centered) if isinstance(solver, ADMMSpLICESolver) else solver.solve(C_centered, z_centered)
-
-    # 5. Interpret (with Blocklist Cleaning)
-    interpreter = SpLiCEInterpreter(aligner, dict_builder.concept_texts)
-    
-    # Block web artifacts common in LAION
-    BLOCKLIST = ["download", "image", "photo", "picture", "wallpaper", "jpg", "jpeg", "stock"]
-    
-    w_cpu = weights.flatten().cpu().numpy()
-    for i, text in enumerate(dict_builder.concept_texts):
-        if text.lower() in BLOCKLIST:
-            w_cpu[i] = 0.0
+        # B. Align Image
+        z_centered = aligner.align_image(z_img)
+        
+        # C. Solve for Sparse Weights
+        weights = solver.solve(z_centered)
+        
+        # D. Interpret Results
+        weights_np = weights.detach().cpu().numpy().flatten()
+        
+        # Sort by weight value (highest first)
+        top_indices = np.argsort(weights_np)[::-1]
+        
+        print("\n--- RESULTS ---")
+        print(f"Found {np.count_nonzero(weights_np > 0.001)} active concepts.\n")
+        
+        print(f"{'WEIGHT':<10} | {'CONCEPT'}")
+        print("-" * 30)
+        
+        for idx in top_indices:
+            val = weights_np[idx]
+            if val < 0.01: break # Stop showing weak concepts
+            print(f"{val:<10.4f} | {vocab[idx]}")
             
-    df = interpreter.get_explanation(torch.from_numpy(w_cpu), top_k=15)
-    print("\n--- Concepts ---")
-    print(df)
-    
-    z_rec = interpreter.reconstruct_embedding(C_centered, weights)
-    fid = interpreter.compute_fidelity(z_img, z_rec)
-    print(f"\nFidelity: {fid:.4f}")
+    except Exception as e:
+        print(f"Error processing image: {e}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Decompose a single image into semantic concepts.")
+    parser.add_argument("image", type=str, help="Path to the input image file")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.image):
+        print(f"Error: File '{args.image}' does not exist.")
+    else:
+        decompose_single_image(args.image)

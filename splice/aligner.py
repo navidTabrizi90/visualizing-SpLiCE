@@ -5,11 +5,9 @@ from typing import Optional
 class ModalityAligner:
     """
     Handles geometric alignment to fix the 'Modality Gap'.
-    
-    Paper Reference:
-    - [cite_start]CLIP image and text embeddings exist on two different cones[cite: 321].
-    - [cite_start]Solution: Center both using their respective means (mu_img, mu_con)[cite: 322].
-    - [cite_start]Critical: Vectors must be re-normalized after centering[cite: 322].
+    CLIP image and text embeddings exist on two different cones
+    Solution: Center both using their respective means (mu_img, mu_con)
+    Vectors must be re-normalized after centering
     """
     
     def __init__(self, device: str = None):
@@ -23,7 +21,7 @@ class ModalityAligner:
     def align_dictionary(self, concept_matrix: torch.Tensor) -> torch.Tensor:
         """
         Centers the dictionary C using the Concept Mean (mu_con).
-        [cite_start]Ref: C_centered = sigma(g(x) - mu_con)[cite: 325].
+        C_centered = sigma(g(x) - mu_con)
         """
         self.mu_con = torch.mean(concept_matrix, dim=0, keepdim=True).to(self.device)
         C_centered = concept_matrix.to(self.device) - self.mu_con
@@ -34,7 +32,7 @@ class ModalityAligner:
     def align_image(self, z_img: torch.Tensor) -> torch.Tensor:
         """
         Centers the image using the Image Mean (mu_img).
-        [cite_start]Ref: z_centered = sigma(z^img - mu_img)[cite: 326].
+        z_centered = sigma(z^img - mu_img)
         """
         if self.mu_img is None:
             raise ValueError("Image mean (mu_img) must be set before aligning images.")
@@ -47,7 +45,7 @@ class ModalityAligner:
     def unalign_reconstruction(self, z_rec_centered: torch.Tensor) -> torch.Tensor:
         """
         Reverses alignment for reconstruction.
-        [cite_start]Ref: z_hat = sigma(C w + mu_img)[cite: 334].
+        z_hat = sigma(C w + mu_img)
         """
         if self.mu_img is None:
             raise ValueError("Image mean is missing.")

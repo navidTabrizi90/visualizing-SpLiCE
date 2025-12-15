@@ -7,10 +7,8 @@ from tqdm import tqdm
 class CLIPFeatureExtractor:
     """
     Wrapper for OpenCLIP to extract dense image and text embeddings.
-    
-    Paper Reference:
-    - [cite_start]Uses OpenCLIP ViT-B/32 model[cite: 338].
-    - [cite_start]Normalizes embeddings to the unit sphere (sigma operation)[cite: 324].
+    Uses OpenCLIP ViT-B/32 model
+    Normalizes embeddings to the unit sphere (sigma operation)
     """
     
     def __init__(self, 
@@ -40,7 +38,6 @@ class CLIPFeatureExtractor:
     def get_image_embedding(self, image_input: Union[str, Image.Image]) -> torch.Tensor:
         """
         Extracts and normalizes dense image embedding (z^img).
-        [cite_start]Ref: "z^img = f(x^img)"[cite: 180].
         """
         if isinstance(image_input, str):
             image = Image.open(image_input).convert("RGB")
@@ -51,7 +48,7 @@ class CLIPFeatureExtractor:
         
         with torch.no_grad():
             features = self.model.encode_image(image_tensor)
-            # [cite_start]CRITICAL: SpLiCE requires unit-norm embeddings [cite: 324]
+            #SpLiCE requires unit-norm embeddings 
             features = features / features.norm(dim=-1, keepdim=True)
             
         return features
@@ -70,6 +67,6 @@ class CLIPFeatureExtractor:
             with torch.no_grad():
                 features = self.model.encode_text(tokens)
                 features = features / features.norm(dim=-1, keepdim=True)
-                all_features.append(features)
+                all_features.append(features)   
                 
         return torch.cat(all_features, dim=0)
