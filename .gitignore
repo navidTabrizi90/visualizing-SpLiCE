@@ -1,5 +1,63 @@
-# Datasets
+# ======================
+# Datasets (generic)
+# ======================
+data/
+dataset/
+datasets/
+raw_data/
+processed_data/
+input/
+inputs/
+output/
+outputs/
 Sketchy/
+Sketchy_original_only
+
+# Large files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Images / videos (common in datasets)
+
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.tif
+*.gif
+*.mp4
+*.avi
+*.mov
+
+# Scientific / ML data formats
+*.csv
+*.tsv
+*.parquet
+*.h5
+*.hdf5
+*.npy
 *.npz
-# Large dataset metadata
-SKETCHY_train_nested_with_sketches_withHED.json
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.pickle
+
+# Annotation formats
+*.json
+*.geojson
+*.xml
+*.yml
+*.yaml
+
+# ======================
+# OS / IDE
+# ======================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

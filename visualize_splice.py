@@ -6,6 +6,7 @@ from io import BytesIO
 from PIL import Image
 import json
 
+# pip install scikit-learn umap-learn dash pandas plotly
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
@@ -15,47 +16,68 @@ from dash import Dash, dcc, html, Input, Output, State, no_update, clientside_ca
 import plotly.graph_objects as go
 import plotly.colors
 
-# --- CONFIG ---
-INPUT_FILE = 'splice_data_sketchy.npz'
-IMAGE_FOLDER = os.path.join('Sketchy', 'images')
-NUM_CLUSTERS = 10 
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
+INPUT_FILE = "splice_embeddings_100.npz"
+VOCAB_PATH = os.path.join("vocab", "laion.txt")
+NUM_CLUSTERS = 10
 
-# --- LOAD DATA ---
+# --------------------------------------------------
+# LOAD DATA
+# --------------------------------------------------
 if not os.path.exists(INPUT_FILE):
-    raise FileNotFoundError(f"Could not find {INPUT_FILE}. Please run generate_splice_embeddings.py first.")
+    raise FileNotFoundError(f"Could not find {INPUT_FILE}")
 
 print(f"Loading SpLiCE data from {INPUT_FILE}...")
-data = np.load(INPUT_FILE)
-weights = data['weights']   # Shape (N, 10000)
-vocab = data['vocab']       # Shape (10000,)
+data = np.load(INPUT_FILE, allow_pickle=True)
 
-# Decode strings
-filenames = [f.decode('utf-8') if isinstance(f, bytes) else f for f in data['filenames']]
-captions = [c.decode('utf-8') if isinstance(c, bytes) else c for c in data['captions']]
+# SpLiCE sparse embeddings
+weights = data["sparse"]              # (N, num_concepts)
+
+# Image paths (absolute or relative)
+filenames = data["image_paths"]
+
+# Load vocabulary
+with open(VOCAB_PATH, "r", encoding="utf-8") as f:
+    vocab = [l.strip() for l in f.readlines()]
+
+# Keep only vocab size actually used
+vocab = vocab[-weights.shape[1]:]
+
+# Use folder name as class / caption (Sketchy-style)
+captions = [os.path.basename(os.path.dirname(p)) for p in filenames]
 
 N = len(filenames)
 print(f"Loaded {N} samples.")
+print("weights shape:", weights.shape)
 
-# --- CLUSTERING & REDUCTION ---
-# SpLiCE weights are our "embeddings". We use them for clustering/viz.
-print(f"Running K-Means Clustering on SpLiCE weights (k={NUM_CLUSTERS})...")
+# --- CLUSTERING & REDUCTION (OPTIMIZED) ---
+
+# 1. PCA Reduction (The Speed Fix)
+print("Running PCA reduction (10000 -> 50 components)...")
+pca_50 = PCA(n_components=50, random_state=42).fit_transform(weights)
+
+# 2. Clustering (on 50D data)
+print(f"Running K-Means Clustering (k={NUM_CLUSTERS})...")
 kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init=10)
-cluster_labels = kmeans.fit_predict(weights)
+cluster_labels = kmeans.fit_predict(pca_50)
 
-print("Running PCA...")
+# 3. Dimensionality Reduction (on 50D data)
+print("Running 2D PCA...")
 pca_2d = PCA(n_components=2).fit_transform(weights)
 
-print("Running t-SNE...")
-# Metric='cosine' is often better for sparse data, but euclidean is standard for t-SNE
-tsne_2d = TSNE(n_components=2, perplexity=min(30, N - 1), metric='cosine', random_state=42).fit_transform(weights)
+print("Running t-SNE (on 50D data)...")
+# metric='cosine' is good for semantic vectors, but 'euclidean' is faster/standard for t-SNE
+tsne_2d = TSNE(n_components=2, perplexity=min(30, N - 1), metric='cosine', random_state=42).fit_transform(pca_50)
 
-print("Running UMAP...")
-umap_2d = umap.UMAP(n_components=2, metric='cosine', random_state=42).fit_transform(weights)
+print("Running UMAP (on 50D data)...")
+umap_2d = umap.UMAP(n_components=2, metric='cosine', random_state=42).fit_transform(pca_50)
 
 reductions = {
-    "PCA": pca_2d,
+    "UMAP": umap_2d,
     "t-SNE": tsne_2d,
-    "UMAP": umap_2d
+    "PCA": pca_2d
 }
 
 colormap = plotly.colors.qualitative.Bold
@@ -79,15 +101,16 @@ TOOLTIP_STYLE = {
 }
 
 app.layout = html.Div([
-    html.H3("SpLiCE Embedding", style={"textAlign": "center", "fontFamily": "Arial, sans-serif", "color": "#333"}),
+    html.H3("SpLiCE Embedding Explorer", style={"textAlign": "center", "fontFamily": "Arial, sans-serif", "color": "#333"}),
 
     html.Div([
+        html.Label("Projection Algorithm: ", style={"fontWeight": "bold", "marginRight": "10px"}),
         dcc.Dropdown(
             id="algo",
             options=[{"label": k, "value": k} for k in reductions],
             value="UMAP",
             clearable=False,
-            style={"width": "200px", "margin": "auto"}
+            style={"width": "200px", "display": "inline-block", "verticalAlign": "middle"}
         )
     ], style={"textAlign": "center", "marginBottom": "20px"}),
 
@@ -100,24 +123,29 @@ app.layout = html.Div([
 
 ], style={"backgroundColor": "#fafafa", "padding": "20px", "fontFamily": "Arial, sans-serif"})
 
-def encode_image(rel_path):
-    path = os.path.join(IMAGE_FOLDER, rel_path)
+def encode_image(path):
     try:
+        if not os.path.exists(path):
+            return None
         img = Image.open(path).convert("RGB")
         img.thumbnail((200, 200))
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=70)
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
+        print("Image load error:", e)
         return None
+
 
 def get_top_concepts(idx, top_k=5):
     """Helper to extract top SpLiCE concepts for tooltip"""
     w = weights[idx]
+    # Get indices of top k weights
     top_indices = np.argsort(w)[-top_k:][::-1]
     concepts = []
     for i in top_indices:
         val = w[i]
+        # Only show concepts with meaningful weight
         if val > 0.001: 
             concepts.append(f"{vocab[i]} ({val:.2f})")
     if not concepts: return ["No strong concepts found"]
@@ -137,17 +165,17 @@ def update_figure(algo):
     fig = go.Figure()
 
     # Trace 0: Images (SpLiCE Embeddings)
-    fig.add_trace(go.Scatter(
+    fig.add_trace(go.Scattergl(  # Scattergl is faster for many points
         x=coords[:, 0],
         y=coords[:, 1],
         mode='markers',
         name='Images',
         marker=dict(
             symbol='circle',
-            size=9,
+            size=8,
             color=point_colors,
             opacity=0.7,
-            line=dict(width=1, color='white')
+            line=dict(width=0.5, color='white')
         ),
         customdata=customdata,
         hoverinfo='none'
@@ -156,10 +184,10 @@ def update_figure(algo):
     fig.update_layout(
         template="plotly_white",
         hovermode="closest",
-        xaxis=dict(showgrid=True, gridcolor='#f0f0f0', showticklabels=True, zeroline=True),
-        yaxis=dict(showgrid=True, gridcolor='#f0f0f0', showticklabels=True, zeroline=True),
+        xaxis=dict(showgrid=True, gridcolor='#f0f0f0', showticklabels=False, zeroline=False),
+        yaxis=dict(showgrid=True, gridcolor='#f0f0f0', showticklabels=False, zeroline=False),
         margin=dict(l=20, r=20, t=20, b=20),
-        legend=dict(title="Clusters (SpLiCE Concepts)")
+        legend=dict(title="Clusters")
     )
     return fig
 
@@ -194,14 +222,14 @@ def update_tooltip(hoverData):
             html.Img(src=img_src, style={"width": "100%", "borderRadius": "4px", "marginBottom": "8px"}),
             
             html.Div([
-                html.Span("Original Caption: ", style={"fontWeight": "bold", "color": "#555", "fontSize": "11px"}),
+                html.Span("Class: ", style={"fontWeight": "bold", "color": "#555", "fontSize": "11px"}),
                 html.Span(real_caption, style={"fontSize": "12px", "lineHeight": "1.3"})
             ]),
 
             html.Hr(style={"margin": "8px 0", "borderTop": "1px solid #eee"}),
 
             html.Div([
-                html.Span("SpLiCE Concepts:", style={"fontWeight": "bold", "color": "#d62728", "fontSize": "11px"}),
+                html.Span("Top Concepts:", style={"fontWeight": "bold", "color": "#d62728", "fontSize": "11px"}),
                 html.Ul([html.Li(c) for c in top_concepts], style={"paddingLeft": "15px", "margin": "4px 0", "fontSize": "11px"})
             ])
         ]
@@ -211,22 +239,28 @@ def update_tooltip(hoverData):
         return False, no_update, no_update
 
 # --- CALLBACK 3: INSTANT HIGHLIGHTING (JS) ---
-# Modified to work with single trace (Images) instead of 2 traces
 clientside_callback(
     """
     function(hoverData, figure, clusterLabels, N) {
         // 1. Un-hover
         if (!hoverData || !figure) {
-            const newOpacity = Array(N).fill(0.7);
+            // Restore default opacity if no hover
+            // We need to return the figure with restored opacity
+            // Check if we need to clone.
+            // Actually, returning no_update is better if we just want to reset,
+            // but here we want to reset visual state.
             
             const newFigure = JSON.parse(JSON.stringify(figure));
-            newFigure.data[0].marker.opacity = newOpacity;
-            return newFigure;
+            if (newFigure.data[0].marker.opacity && Array.isArray(newFigure.data[0].marker.opacity)) {
+                 // Reset to single value or full array of 0.7
+                 newFigure.data[0].marker.opacity = 0.7;
+                 return newFigure;
+            }
+            return window.dash_clientside.no_update;
         }
 
         const pt = hoverData.points[0];
         
-        // Safety Check
         if (!pt.customdata || pt.customdata.length < 2) {
             return window.dash_clientside.no_update;
         }
@@ -234,6 +268,7 @@ clientside_callback(
         const targetCluster = pt.customdata[1];
         const newOpacity = [];
 
+        // Simple loop to dim non-cluster points
         for (let i = 0; i < N; i++) {
             newOpacity.push(clusterLabels[i] === targetCluster ? 1.0 : 0.1);
         }
