@@ -159,7 +159,7 @@ This enables qualitative inspection of the semantic structure induced by SpLiCE.
 
 The sparse coding problem solved is:
 
-\[\min_{\mathbf{z}} \; \|\mathbf{C}\mathbf{z} - \mathbf{v}\|_2^2 + \lambda \|\mathbf{z}\|_1\quad \text{s.t.} \quad \mathbf{z} \ge 0\]
+<img width="318" height="42" alt="Screenshot 2026-01-21 at 10 22 02" src="https://github.com/user-attachments/assets/e5175747-bd8c-4546-ba57-546e0cec0598" />
 
 Where:
 - `C` is the concept dictionary  
