@@ -34,6 +34,7 @@ SpLiCE represents each image embedding as a **sparse, non-negative linear combin
 ├── image.py                     # Image loading and utility functions
 ├── requirements.txt
 └── README.md
+```
 
 ## 3. Installation
 
