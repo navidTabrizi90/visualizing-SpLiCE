@@ -158,7 +158,7 @@ This enables qualitative inspection of the semantic structure induced by SpLiCE.
 ## 9. Optimization Details (ADMM)
 
 The sparse coding problem solved is:
-```latezx
+```latex
 \[
 \min_{\mathbf{z}} \; \| \mathbf{C}\mathbf{z} - \mathbf{v} \|_2^2
 \;+\;
