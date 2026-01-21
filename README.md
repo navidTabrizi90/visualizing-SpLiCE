@@ -158,11 +158,11 @@ This enables qualitative inspection of the semantic structure induced by SpLiCE.
 ## 9. Optimization Details (ADMM)
 
 The sparse coding problem solved is:
-
+```latezx
 \[
 \min_z \| Cz - v \|_2^2 + \lambda \|z\|_1 \quad \text{s.t. } z \ge 0
 \]
-
+```
 Where:
 - `C` is the concept dictionary  
 - `v` is the centered image embedding  
