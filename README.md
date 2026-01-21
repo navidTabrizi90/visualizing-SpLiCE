@@ -1,92 +1,105 @@
-# SpLiCE — Applying Sparse Linear Concept Explanations to New Datasets
+# Visualizing SpLiCE  
+**Sparse Concept-Based Decomposition and Visualization of CLIP Embeddings**
 
-This repository provides a **clean, minimal, and explicit implementation of SpLiCE** (Sparse Linear Concept Explanations) for **analyzing CLIP embeddings on new datasets**.
+This repository provides an end-to-end implementation of **SpLiCE (Sparse Linear Concept Explanations)** applied to CLIP image embeddings, together with tools to:
 
-The code applies **post-hoc sparse decomposition** to **frozen CLIP embeddings** in order to obtain **interpretable concept-based representations**, without any training or fine-tuning.
+- Decompose images into **interpretable sparse concept weights**
+- Reconstruct CLIP embeddings from concepts
+- Extract SpLiCE embeddings for datasets
+- **Interactively visualize** SpLiCE representations using UMAP / t-SNE / PCA
 
----
-
-## 🔍 What This Repository Does
-
-- Loads a **pretrained CLIP / OpenCLIP model**
-- Builds a **concept dictionary** from a text vocabulary
-- Reuses a **precomputed image mean** (no retraining)
-- Applies **ADMM-based sparse optimization** at inference time
-- Produces:
-  - **Sparse SpLiCE embeddings** (concept weights)
-  - **Dense SpLiCE embeddings** (reconstructed CLIP-space vectors)
-- Supports applying SpLiCE to **new datasets** for analysis and visualization
+The implementation follows the core ideas of the SpLiCE paper and extends them with dataset-level processing, batched optimization, and interactive visualization.
 
 ---
 
-## 🚫 What This Repository Does NOT Do
+## 1. Method Overview
 
-- ❌ No training
-- ❌ No fine-tuning
-- ❌ No gradient updates
-- ❌ No parameter learning
-- ❌ No modification of CLIP weights
+Given:
+- A pretrained **CLIP image encoder**
+- A **concept dictionary** (text embeddings from a vocabulary)
+- A **precomputed image mean** (for modality alignment)
 
-SpLiCE here is used strictly as a **post-hoc interpretability method**.
+SpLiCE represents each image embedding as a **sparse, non-negative linear combination of semantic concepts**.
 
----
-
-## 📌 Method Overview (High Level)
-
-Given an image:
-
-1. Encode the image using a **frozen CLIP encoder**
-2. Normalize and **mean-center** the embedding
-3. Solve the sparse optimization problem:
-
-\[
-\min_{w \ge 0} \;\|Cw - z\|_2^2 + 2\lambda \|w\|_1
-\]
-
-where:
-- \( z \) is the image embedding
-- \( C \) is the concept dictionary
-- \( w \) is the sparse concept weight vector
-
-4. Use \( w \) as:
-   - an **interpretable embedding**
-   - or reconstruct a dense embedding in CLIP space
+### Pipeline
+1. Encode image with CLIP  
+2. Normalize and **mean-center** image embedding  
+3. Solve sparse coding via **ADMM (L1-regularized)**  
+4. Obtain:
+   - Sparse concept weights (interpretable)
+   - Dense reconstructed embedding  
+5. Optionally visualize and cluster results  
 
 ---
 
-## 📂 Repository Structure
+## 2. Repository Structure
 
-├── admm.py # ADMM solver for sparse non-negative optimization
-├── model.py # SPLICE model (decompose, recompose, encode)
-├── main.py # CLI-style experiment runner
-├── predict_one.py # Single-image inference and explanation
-├── extract_dataset_embeddings.py # Apply SpLiCE to a full dataset
+.
+├── admm.py                     # ADMM solver for sparse optimization
+├── model.py                    # SPLICE model (decompose / recompose)
+├── main.py                     # Demo on a single sketch image
+├── predict_one.py              # CLI tool for single-image analysis
+├── extract_dataset_embeddings.py  # Batch extraction of SpLiCE embeddings
+├── visualize_splice.py         # Interactive Dash visualization app
+├── image.py                    # Utility to extract original images only
+├── datasets.py                 # (Dataset helpers, if extended)
 ├── vocab/
-│ └── laion.txt # Concept vocabulary
-├── means/
-│ └── open_clip_ViT-B-32_image.pt # Precomputed image mean
+│   └── laion.txt               # Vocabulary used as concept dictionary
+├── requirements.txt
 └── README.md
+---
 
+## 3. Installation
+
+### Requirements
+- Python ≥ 3.9  
+- CUDA-enabled GPU recommended  
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+
+## 4. Data Preparation
+
+### 4.1 Vocabulary (Concept Dictionary)
+
+The vocabulary file (`vocab/laion.txt`) must contain **one concept per line**.  
+Only the **last `VOCAB_SIZE` entries** are used (default: 10,000), following the SpLiCE setup with a large semantic dictionary.
+
+The quality and coverage of this vocabulary directly affect interpretability and sparsity.
 
 ---
 
-## ⚙️ Requirements
+### 4.2 Image Mean (Required)
 
-- Python ≥ 3.8
-- PyTorch
-- open_clip
-- Pillow
-- NumPy
-
-Install dependencies (example):
+SpLiCE requires a **precomputed CLIP image mean** for modality alignment:
 
 ```bash
-pip install torch torchvision open-clip-torch pillow numpy
+means/open_clip_ViT-B-32_image.pt
 
 
-## 🚀 Quick Start — Single Image
+Important constraints:
+- Must be computed using the **same CLIP backbone**
+- Must use the **same preprocessing**
+- Must reflect the **same data distribution**
 
-Run SpLiCE on a single image to obtain an interpretable concept-based explanation.
+This repository **reuses** the mean and never recomputes it.
+
+---
+
+## 5. Running the Demo (Single Image)
+
+```bash
+python main.py
+
+What this does:
+- Loads CLIP ViT-B/32
+- Builds concept dictionary from vocab
+- Loads image mean
+- Decomposes one sketch image
+- Prints top active concepts and weights
+
+## 6. Single Image via CLI
 
 ```bash
 python predict_one.py \
@@ -94,6 +107,115 @@ python predict_one.py \
   -mean_path means/open_clip_ViT-B-32_image.pt \
   -vocab_path vocab/laion.txt \
   -vocab_size 10000 \
-  -l1_penalty 0.25 \
-  -device cuda
+  -l1_penalty 0.25
+Outputs:
 
+- Top contributing concepts
+- L0 norm (sparsity level)
+- Cosine similarity between original CLIP embedding and SpLiCE reconstruction
+
+## 7. Dataset-Level Embedding Extraction
+
+```bash
+python extract_dataset_embeddings.py
+
+This script:
+- Processes images in batches
+- Applies SpLiCE sparse decomposition
+
+Saves results to:
+```bash
+splice_embeddings_100.npz
+The file contains:
+- `sparse`: sparse concept weights (N × num_concepts)
+- `dense`: reconstructed CLIP embeddings (N × 512)
+- `image_paths`: image file paths
+
+You can control:
+- `MAX_IMAGES`
+- `BATCH_SIZE`
+- `VOCAB_SIZE`
+
+---
+
+## 8. Interactive Visualization
+
+```bash
+python visualize_splice.py
+
+Starts a Dash app at:
+
+http://127.0.0.1:8050/
+
+
+### Features
+- PCA / t-SNE / UMAP projections  
+- K-Means clustering  
+- Hover tooltips with:
+  - Image preview
+  - Top SpLiCE concepts
+  - Cluster membership
+- Dynamic cluster highlighting
+
+This enables qualitative inspection of the semantic structure induced by SpLiCE.
+
+---
+
+## 9. Optimization Details (ADMM)
+
+The sparse coding problem solved is:
+
+\[
+\min_z \| Cz - v \|_2^2 + \lambda \|z\|_1 \quad \text{s.t. } z \ge 0
+\]
+
+Where:
+- `C` is the concept dictionary  
+- `v` is the centered image embedding  
+
+Key ADMM parameters:
+- `rho`: penalty parameter  
+- `l1_penalty`: sparsity strength  
+- `tol`: convergence tolerance  
+- `max_iter`: maximum iterations  
+
+The Cholesky factorization is **precomputed once** for efficiency.
+
+---
+
+## 10. Design Choices and Trade-offs
+
+- Large vocabularies (10k) → richer semantics, slower optimization  
+- Non-negativity constraint → improved interpretability  
+- Mean-centering → modality alignment (SpLiCE paper, Section 4.1)  
+- No finetuning → pure inference, fast experimentation  
+
+---
+
+## 11. Limitations
+
+- ADMM becomes slow for extremely large vocabularies  
+- Concept quality depends heavily on vocabulary quality  
+- Incorrect image mean degrades reconstruction quality  
+- CLIP biases propagate into concept explanations  
+
+---
+
+## 12. Intended Use Cases
+
+- Interpretable vision–language research  
+- Dataset exploration and semantic clustering  
+- Concept-based analysis of CLIP embeddings  
+- Educational demonstrations of sparse explanations  
+
+---
+
+## 13. Attribution
+
+This implementation is inspired by:
+
+**SpLiCE: Sparse Linear Concept Explanations for Image Classifiers**
+
+CLIP backbone provided by **OpenCLIP**.
+
+This repository focuses on practical sparse decomposition, batching, and interactive visualization, extending the original SpLiCE method to dataset-level analysis.
